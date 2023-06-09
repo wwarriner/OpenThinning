@@ -1,4 +1,3 @@
-import itertools
 import logging
 import time
 from pathlib import PurePath
@@ -61,6 +60,20 @@ class PerformanceCounter:
 
     def _log(self, _v: Iterable[str]) -> None:
         logging.info(",".join(_v))
+
+
+class NullPerformanceCounter(PerformanceCounter):
+    def __init__(*args, **kwargs) -> None:
+        pass
+
+    def __enter__(self) -> "NullPerformanceCounter":
+        return self
+
+    def start(self) -> None:
+        pass
+
+    def stop(self, *args, **kwargs) -> None:
+        pass
 
 
 def cartesian(arrays, out=None):

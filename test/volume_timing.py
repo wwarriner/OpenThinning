@@ -99,6 +99,11 @@ def test_thin__timing():
     v.apply_lut(lut, PurePath("anti-ball-perf.log"))
     v._write_vtk("antiball-skel.vtk")
 
+    v = Volume.box_cross(SHAPE)
+    v._write_vtk("box-cross.vtk")
+    v.apply_lut(lut, None)
+    v._write_vtk("box-cross-skel.vtk")
+
 
 if __name__ == "__main__":
     test_thin__timing()

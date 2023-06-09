@@ -1,7 +1,7 @@
 import enum
 import itertools
 from pathlib import Path, PurePath
-from typing import Any, Tuple, TypeVar
+from typing import Any, Optional, Tuple, TypeVar
 
 import numba
 import numpy as np
@@ -80,7 +80,8 @@ class Volume:
         assert _v.dtype == self.dtype
         assert _v.ndim == 3
 
-        v = self._pad(_v)
+        v = _v.copy()
+        v = self._pad(v)
 
         self._v: BoolArrayT = v
 
@@ -100,7 +101,7 @@ class Volume:
         self,
         _lut: LookupTable,
         /,
-        timing_log_path: PurePath = PurePath("apply_lut_timing.log"),
+        timing_log_path: Optional[PurePath] = None,
     ) -> None:
         """
         modifies self
@@ -113,7 +114,9 @@ class Volume:
             "count_of_true": "{0:d}",
             "frac_of_true": "{0:.16f}",
         }
-        with iter_utils.PerformanceCounter(formatters, timing_log_path) as perfc:
+        with iter_utils.PerformanceCounter(
+            formatters, timing_log_path
+        ) if timing_log_path else iter_utils.NullPerformanceCounter() as perfc:
             while modified:
                 modified = False
                 for axis, offset in itertools.product(Axis, Offset):
