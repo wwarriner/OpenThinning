@@ -41,7 +41,7 @@ class VolumeTest(unittest.TestCase):
             dtype=np.bool_,
         )
         npt.assert_array_equal(
-            Volume(arr)._get_neighborhood(center), cube_to_neighborhood(arr)
+            Volume(arr)._get_neighborhood(center), Volume.cube_to_neighborhood(arr)
         )
 
         """
@@ -50,7 +50,7 @@ class VolumeTest(unittest.TestCase):
         arr = np.zeros((3, 3, 3), dtype=np.bool_)
         arr[0, 0, 0] = True
         npt.assert_array_equal(
-            Volume(arr)._get_neighborhood(center), cube_to_neighborhood(arr)
+            Volume(arr)._get_neighborhood(center), Volume.cube_to_neighborhood(arr)
         )
 
     def test_get_candidates(self):
