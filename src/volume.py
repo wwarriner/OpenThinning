@@ -1,11 +1,13 @@
+import enum
 import itertools
-import logging
-import time
 from pathlib import Path, PurePath
 from typing import Any, Tuple, TypeVar
 
 import numba
 import numpy as np
+
+import src.iter_utils as iter_utils
+from src.lookup_table import LookupTable
 
 BoolArrayT = np.ndarray[Any, np.dtype[np.bool_]]
 IntArrayT = np.ndarray[Any, np.dtype[np.intp]]
@@ -18,20 +20,7 @@ _T = TypeVar("_T")
 Vector3 = Tuple[_T, _T, _T]
 
 
-logging.basicConfig(
-    filename="thinning.log",
-    level=logging.INFO,
-    filemode="w",
-    format="%(message)s",
-    force=True,
-)
-
-import enum
-
-from src.lookup_table import LookupTable
-
-
-class Axes(enum.Enum):
+class Axis(enum.Enum):
     X = 0
     Y = 1
     Z = 2
@@ -93,7 +82,7 @@ class Volume:
 
         v = self._pad(_v)
 
-        self._v: BoolArrayT = v  # bool(z, y, x)
+        self._v: BoolArrayT = v
 
     @property
     def size(self) -> int:
@@ -103,33 +92,61 @@ class Volume:
     def shape(self) -> Vector3[int]:
         return tuple(x - 2 for x in self._v.shape)
 
-    def thin(self, _lut: LookupTable, /) -> None:
-        # modifies self
-        logging.info("size,iteration,axis,offset,true_count,true_frac,time_ns")
-        iteration = 0
+    @property
+    def data(self) -> BoolArrayT:
+        return self._unpad(self._v)
+
+    def apply_lut(
+        self,
+        _lut: LookupTable,
+        /,
+        timing_log_path: PurePath = PurePath("apply_lut_timing.log"),
+    ) -> None:
+        """
+        modifies self
+        """
         modified: bool = True
-        while modified:
-            modified = False
-            for axis, offset in itertools.product(Axes, Offset):
-                start_ns = time.perf_counter_ns()
+        formatters = {
+            "size": "{0:d}",
+            "axis": "{0:d}",
+            "offset": "{0:+d}",
+            "count_of_true": "{0:d}",
+            "frac_of_true": "{0:.16f}",
+        }
+        with iter_utils.PerformanceCounter(formatters, timing_log_path) as perfc:
+            while modified:
+                modified = False
+                for axis, offset in itertools.product(Axis, Offset):
+                    perfc.start()
 
-                candidates = self.get_candidates(axis, offset)
-                candidates = self.restrict_candidates(_lut, candidates)
-                # modified |= self.process_candidates(_lut, candidates)
-                modified |= self.process_candidates_numba(_lut, candidates)
+                    modified |= self._apply_lut_to_axis_offset(_lut, axis, offset)
 
-                stop_ns = time.perf_counter_ns()
-                duration_ns = stop_ns - start_ns
+                    true_count = self._v.sum()
+                    true_frac = true_count / self._v.size
 
-                true_count = self._v.sum()
-                true_frac = true_count / self._v.size
+                    perfc.stop(
+                        {
+                            "size": self._v.size,
+                            "axis": axis.value,
+                            "offset": offset.value,
+                            "count_of_true": true_count,
+                            "frac_of_true": true_frac,
+                        }
+                    )
 
-                logging.info(
-                    f"{self._v.size:d},{iteration:d},{axis.value:d},{offset.value:+d},{true_count:d},{true_frac:.16f},{duration_ns:d}"
-                )
-            iteration += 1
+    def _apply_lut_to_axis_offset(
+        self, _lut: LookupTable, _axis: Axis, _offset: Offset, /
+    ) -> bool:
+        """
+        Applies given _lut to given axis-offset combination over contained volume data.q
+        """
+        candidates = self._get_candidates(_axis, _offset)
+        candidates = self._restrict_candidates(_lut, candidates)
+        modified = self._process_candidates_numba(_lut, candidates)
+        # modified = self._process_candidates(_lut, candidates)
+        return modified
 
-    def get_candidates(self, _axis: Axes, _offset: Offset, /) -> IntArrayT:
+    def _get_candidates(self, _axis: Axis, _offset: Offset, /) -> IntArrayT:
         # bool(z, y, x) -> int(k, 3)
         o = abs(_offset.value)
 
@@ -163,32 +180,32 @@ class Volume:
         c = np.expand_dims(c, axis=1)
         return c
 
-    def restrict_candidates(
+    def _restrict_candidates(
         self, _lut: LookupTable, _candidates: IntArrayT, /
     ) -> IntArrayT:
         # int(k, 3) -> int(k, 3)
-        neighborhoods = self.get_neighborhood(_candidates)
+        neighborhoods = self._get_neighborhood(_candidates)
         keep = _lut[neighborhoods[:, 0, :]]
         _candidates = _candidates[keep, ...]
         return _candidates
 
-    def process_candidates_numba(
+    def _process_candidates_numba(
         self, _lut: LookupTable, _candidates: IntArrayT, /
     ) -> bool:
-        return process_candidates(_lut.raw, _candidates, self._v)
+        return _process_candidates_numba(_lut.raw, _candidates, self._v)
 
-    def process_candidates(self, _lut: LookupTable, _candidates: IntArrayT, /) -> bool:
+    def _process_candidates(self, _lut: LookupTable, _candidates: IntArrayT, /) -> bool:
         # modifies _v
         # int(k, 3), bool(z, y, x) -> bool(z, y, x)
         modified: bool = False
         for candidate in _candidates:
-            neighborhood = self.get_neighborhood(candidate)
+            neighborhood = self._get_neighborhood(candidate)
             if _lut[neighborhood].item():
                 self._v[candidate[..., 0], candidate[..., 1], candidate[..., 2]] = False
                 modified = True
         return modified
 
-    def get_neighborhood(self, _candidates: IntArrayT, /) -> BoolArrayT:
+    def _get_neighborhood(self, _candidates: IntArrayT, /) -> BoolArrayT:
         # int(k, 1, 3) -> bool(k, 1, 26)
         candidates = np.expand_dims(_candidates, axis=1)
         neighborhood = (
@@ -200,7 +217,7 @@ class Volume:
         out = self._v[x, y, z]
         return out
 
-    def write_vtk(
+    def _write_vtk(
         self,
         _path: PathLike,
         /,
@@ -212,9 +229,9 @@ class Volume:
     ) -> None:
         b = lambda x: bytes(x, "utf-8")
         v = lambda x: f"{x[0]} {x[1]} {x[2]}"
-        size = lambda x: x[0] * x[1] * x[2]
 
         shape = self.shape
+        size = np.prod(shape)
 
         with open(_path, "wb") as f:
             f.write(b(f"# vtk DataFile Version 2.0\n"))
@@ -224,7 +241,7 @@ class Volume:
             f.write(b(f"DIMENSIONS {v(shape):s}\n"))
             f.write(b(f"SPACING {v(spacing):s}\n"))
             f.write(b(f"ORIGIN {v(origin):s}\n"))
-            f.write(b(f"POINT_DATA {size(shape):d}\n"))
+            f.write(b(f"POINT_DATA {size:d}\n"))
             f.write(b(f"SCALARS {title:s} unsigned_char 1\n"))
             f.write(b(f"LOOKUP_TABLE default\n"))
             f.write(np.moveaxis(self._unpad(self._v), (0, 1, 2), (2, 1, 0)).tobytes())
@@ -263,14 +280,23 @@ class Volume:
         DX = X - XC
         DY = Y - YC
         DZ = Z - ZC
-        D2 = DX * DX + DY * DY + DZ * DZ
-        R2 = _radius * _radius
-        SET_INTERIOR = D2 <= R2
+        D2 = DX**2 + DY**2 + DZ**2
+        R2 = _radius**2
+        IS_INTERIOR = D2 <= R2
 
         v = cls._blank(_shape)
-        v[SET_INTERIOR] = interior
-        v[~SET_INTERIOR] = not interior
+        v[IS_INTERIOR] = interior
+        v[~IS_INTERIOR] = not interior
         return cls(v)
+
+    @staticmethod
+    def cube_to_neighborhood(_v: np.ndarray) -> np.ndarray:
+        arr = _v.ravel()
+        mask = np.ones(np.prod(arr.shape), dtype=np.bool_)
+        mask[13] = False
+        arr = arr[mask]
+        arr = np.expand_dims(arr, 0)
+        return arr
 
     @staticmethod
     def _blank(_shape: Shape, /) -> BoolArrayT:
@@ -301,40 +327,24 @@ class Volume:
         return _v[1:-1, 1:-1, 1:-1]
 
 
-spec = [
-    ("_lut", numba.bool_[:]),
-    ("_candidates", numba.int64[:, :]),
-    ("_v", numba.bool_[:, :, :]),
-]
+@numba.njit(numba.uint32(numba.bool_[:]))
+def _packbits_numba(_v: BoolArrayT) -> numba.uint32:
+    p: numba.uint32 = numba.uint32(0)
+    for i in range(26):
+        p = p | (_v[i] << i)
+    return p
 
 
-@numba.njit  # (spec=spec)
-def process_candidates(
-    _lut: BoolArrayT, _candidates: IntArrayT, _v: BoolArrayT, /
-) -> bool:
-    # modifies _v
-    # bool(m), int(k, 3), bool(z, y, x) -> bool(z, y, x)
-    modified: bool = False
-    for i in range(_candidates.shape[0]):
-        candidate = _candidates[i, 0, :]  # (3)
-        neighborhood = get_neighborhood(candidate, _v)  # (26)
-        if getitem(_lut, neighborhood):
-            x = candidate[0]
-            y = candidate[1]
-            z = candidate[2]
-            _v[x, y, z] = False
-            modified = True
-    return modified
+@numba.njit(numba.bool_(numba.bool_[:], numba.bool_[:]))
+def _getitem_numba(_lut: BoolArrayT, _v: BoolArrayT) -> numba.bool_:
+    # bool(26) -> bool
+    index = _packbits_numba(_v)  # bool(26) -> uint32
+    entry = _lut[index]  # uint32 -> bool
+    return entry
 
 
-spec = [
-    ("_candidates", numba.int64[:, :]),
-    ("_v", numba.bool_[:, :, :]),
-]
-
-
-@numba.njit  # (spec=spec)
-def get_neighborhood(_candidate: IntArrayT, _v: BoolArrayT, /) -> BoolArrayT:
+@numba.njit(numba.bool_[:](numba.int64[:], numba.bool_[:, :, :]))
+def _get_neighborhood_numba(_candidate: IntArrayT, _v: BoolArrayT, /) -> BoolArrayT:
     # int(3) -> bool(26)
     candidate = np.expand_dims(_candidate, axis=0)  # (1, 3)
     neighborhood = candidate + NEIGHBORHOOD_OFFSETS[0, ...]  # (26, 3)
@@ -347,79 +357,20 @@ def get_neighborhood(_candidate: IntArrayT, _v: BoolArrayT, /) -> BoolArrayT:
     return out
 
 
-@numba.njit
-def getitem(_self: BoolArrayT, _v: BoolArrayT) -> BoolArrayT:
-    # bool(26) -> bool
-    index = packbits(_v)  # bool(26) -> uint32
-    entry = _self[index]  # uint32 -> bool
-    return entry
-
-
-@numba.njit
-def setitem(_self: BoolArrayT, _v: BoolArrayT, entry: bool) -> None:
-    index = packbits(_v)
-    _self[index] = entry
-
-
-@numba.njit
-def swap(_v: BoolArrayT, i1: numba.intp, i2: numba.intp) -> None:
-    _v[i1], _v[i2] = _v[i2], _v[i1]
-
-
-# symmetries to test
-
-# reflection if any element of opposing faces differ
-# rotation if any element of same-oriented edges differ
-# mark checked ones as we go to avoid duplication
-
-
-@numba.njit
-def reflect_x(_v) -> None:
-    swap(_v, 0, 2)
-    swap(_v, 3, 5)
-    swap(_v, 6, 8)
-    swap(_v, 9, 11)
-    # y center offset -1
-    swap(_v, 12, 13)
-    # x center offset -1
-    swap(_v, 14, 16)
-    swap(_v, 17, 19)
-    swap(_v, 20, 22)
-    swap(_v, 23, 25)
-
-
-@numba.njit
-def reflect_y(_v) -> None:
-    swap(_v, 0, 6)
-    swap(_v, 1, 7)
-    swap(_v, 2, 8)
-    # y center offset -1
-    swap(_v, 9, 14)
-    swap(_v, 10, 15)
-    swap(_v, 11, 16)
-    # x center offset -1
-    swap(_v, 17, 23)
-    swap(_v, 18, 24)
-    swap(_v, 19, 25)
-
-
-@numba.njit
-def reflect_z(_v) -> None:
-    # y center offset -1
-    swap(_v, 0, 17)
-    swap(_v, 1, 18)
-    swap(_v, 2, 19)
-    swap(_v, 3, 20)
-    swap(_v, 4, 21)
-    swap(_v, 5, 22)
-    swap(_v, 6, 23)
-    swap(_v, 7, 24)
-    swap(_v, 8, 25)
-
-
-@numba.njit
-def packbits(_v: BoolArrayT) -> numba.uint32:
-    p: numba.uint32 = numba.uint32(0)
-    for i in range(26):
-        p = p | (_v[i] << i)
-    return p
+@numba.njit(numba.bool_(numba.bool_[:], numba.int64[:, :, :], numba.bool_[:, :, :]))
+def _process_candidates_numba(
+    _lut: BoolArrayT, _candidates: IntArrayT, _v: BoolArrayT, /
+) -> bool:
+    # modifies _v
+    # bool(m), int(k, 3), bool(z, y, x) -> bool(z, y, x)
+    modified: bool = False
+    for i in range(_candidates.shape[0]):
+        candidate = _candidates[i, 0, :]  # (3)
+        neighborhood = _get_neighborhood_numba(candidate, _v)  # (26)
+        if _getitem_numba(_lut, neighborhood):
+            x = candidate[0]
+            y = candidate[1]
+            z = candidate[2]
+            _v[x, y, z] = False
+            modified = True
+    return modified

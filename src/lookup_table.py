@@ -55,3 +55,15 @@ class LookupTable:
     def random(cls, /) -> "LookupTable":
         rng = np.random.default_rng()
         return cls(rng.choice([False, True], size=(cls.SIZE,)))
+
+    @classmethod
+    def thinning_medial_surface(cls) -> "LookupTable":
+        return cls.read(PurePath("res/lut-thinning-medial-surface.bin"))
+
+    @classmethod
+    def thinning_medial_axis(cls) -> "LookupTable":
+        return cls.read(PurePath("res/lut-thinning-medial-axis.bin"))
+
+    @classmethod
+    def thinning_simple(cls) -> "LookupTable":
+        return cls.read(PurePath("res/lut-thinning-simple.bin"))
